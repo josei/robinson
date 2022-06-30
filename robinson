@@ -1,0 +1,96 @@
+#!/usr/bin/env python
+# joseignacio.fernandez@gmail.com, MIT license
+import os, re, argparse
+
+FOLDER = os.getcwd().split('/')[-1]
+
+parser = argparse.ArgumentParser(
+    prog='robinson',
+    description="identifies isolated contributors in a git project",
+    formatter_class=argparse.ArgumentDefaultsHelpFormatter
+)
+parser.add_argument('-a', '--aliases', help='include a list of alias emails pairs', nargs='*', default=[])
+parser.add_argument('-c', '--cost', help='show COCOMO-estimated cost instead of edits', action='store_true')
+parser.add_argument('-t', '--threshold', dest='threshold', help='minimum edits required to be relevant', default=800)
+parser.add_argument('-p', '--percentage', dest='percentage', help='minumum percentage required to top contributor', default=85)
+parser.add_argument('-s', '--show-contributors', dest='contributors', help='show all contributors', action='store_true')
+args = parser.parse_args()
+
+log = os.popen('git log --stat').readlines()
+if len(log) == 0: exit()
+files = [f'{FOLDER}/' + f.strip() for f in os.popen('git ls-files').readlines()]
+
+aliases = {}
+while len(args.aliases) > 0: aliases[args.aliases.pop()] = args.aliases.pop()
+
+def cost(count):
+    if not args.cost: return f'{count} edits'
+    effort = 2.8 * ((count / 1000.0) ** 1.2)
+    return f'${int(effort * 10)}k'
+
+def is_silo(authors):
+    total = sum(authors.values())
+    for author, count in authors.items():
+        if total > args.threshold and count > args.percentage * total / 100:
+            return True
+    return False
+
+def parent(path):
+    if '/' not in path: return None
+    return '/'.join(path.split('/')[:-1])
+
+def propagate(edits, propagated=[]):
+    done = True
+    for path, authors in list(edits.items()):
+        parent_path = parent(path)
+        if not parent_path or path in propagated: continue
+        done = False
+        propagated.append(path)
+        for author, count in authors.items():
+            edits[parent_path] = edits.get(parent_path, {})
+            edits[parent_path][author] = edits[parent_path].get(author, 0) + count
+    if not done: propagate(edits, propagated) # Propagate up until done
+
+regexs = {
+    'author': r'^Author: (.*) <(.*)>$',
+    'edit': r'^\s(\w\S*)\s+\|\s+(\d+)\s[+-]+$',
+}
+edits = {}
+
+count_sum = 0
+all_authors = []
+for line in log:
+    for key, regex in regexs.items():
+        match = re.search(regex, line)
+        if not match: continue
+
+        if key == 'author':
+            author = match.group(2).replace('”', '').replace('“', '')
+            for email, alias in aliases.items(): author = author.replace(email, alias)
+            if author not in all_authors: all_authors.append(author)
+        if key == 'edit':
+            path = f'{FOLDER}/' + match.group(1)
+            count = match.group(2)
+            if path in files:
+                edits[path] = edits.get(path, {})
+                edits[path][author] = edits[path].get(author, 0) + int(count)
+                count_sum += int(count)
+
+propagate(edits)
+
+paths = sorted(edits)
+printed = []
+for path in paths:
+    authors = edits[path]
+    if is_silo(authors):
+        printed.append(path)
+        if parent(path) not in printed:
+            print(path)
+            total = sum(authors.values())
+            for author, count in authors.items():
+                if count > args.percentage * total / 100:
+                    print(f'  {author}: {cost(count)} ({int(count * 100 / total)}%).')
+                    print()
+
+if args.contributors:
+    print(f'All contributors: {", ".join(all_authors)}')
